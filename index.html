@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kadmiriplayer</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
+<style>
+:root{--bg:#0f1115;--panel:#161a22;--accent:#2e6bff;--text:#e6e7eb;--muted:#9aa1ac;--line:#222636;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:Arial,sans-serif;height:100vh;display:grid;grid-template-rows:auto 1fr;}
+.topbar{padding:10px;display:flex;gap:10px;flex-wrap:wrap;background:var(--panel);}
+.topbar input{flex:1;padding:8px;border-radius:6px;border:1px solid var(--line);background:#111;color:var(--text);}
+.topbar button{padding:8px 12px;border:none;border-radius:6px;background:var(--accent);color:#fff;cursor:pointer;}
+.main{display:grid;grid-template-columns:260px 1fr;overflow:hidden;height:100%;}
+.side{background:var(--panel);padding:12px;overflow:auto;}
+.cat button{display:block;width:100%;margin:4px 0;padding:8px;border:none;border-radius:6px;background:#222;color:#fff;cursor:pointer;}
+.cat button.active,.cat button:hover{background:#1e2431;}
+.grid{padding:12px;overflow:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;background:var(--bg);}
+.card{background:#161a22;border:1px solid var(--line);border-radius:10px;padding:10px;cursor:pointer;display:grid;grid-template-rows:120px auto auto;}
+.logo{background:#0c1018;border-radius:6px;display:flex;align-items:center;justify-content:center;overflow:hidden;}
+.logo img{max-width:100%;max-height:100%;object-fit:contain;}
+.name{font-weight:600;margin-top:4px;}
+.epg{font-size:12px;color:var(--muted);margin-top:2px;}
+.fav{width:30px;height:30px;border:none;background:#131a28;color:#ffd54a;border-radius:6px;cursor:pointer;margin-top:6px;}
+.fav.active{background:#2a2110;border-color:#705424;}
+video{width:100%;height:360px;background:#000;margin:10px auto;display:block;}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+<input type="text" id="m3uUrl" placeholder="Plak je M3U-link">
+<input type="text" id="epgUrl" placeholder="(optioneel) Plak je EPG-link">
+<button id="loadBtn">Laad lijsten</button>
+<input type="text" id="searchBox" placeholder="Zoek zender…">
+</div>
+
+<div class="main">
+<aside class="side">
+<div class="cat" id="categoryList"></div>
+</aside>
+
+<section>
+<video id="video" controls></video>
+<div id="channelGrid" class="grid"></div>
+</section>
+</div>
+
+<script>
+let state={channels:[],groups:new Set(),favorites:new Set(JSON.parse(localStorage.getItem('favorites_v1')||'[]')),currentGroup:'Alle',search:'',epg:{}};
+const els={m3uUrl:document.getElementById('m3uUrl'),epgUrl:document.getElementById('epgUrl'),loadBtn:document.getElementById('loadBtn'),searchBox:document.getElementById('searchBox'),catList:document.getElementById('categoryList'),grid:document.getElementById('channelGrid'),video:document.getElementById('video')};
+
+function parseM3U(text){
+let lines=text.split(/\r?\n/);let out=[];let pending=null;
+for(let l of lines){
+l=l.trim();if(!l)continue;
+if(l.startsWith('#EXTINF')){
+const m=l.match(/^#EXTINF:[^ ]*\s*(.*?),(.*)$/)||[null,'',l];let attrs={};let re=/([\w-]+)="([^"]*)"/g;let mm;while((mm=re.exec(m[1]))) attrs[mm[1]]=mm[2];
+pending={name:(m[2]||attrs['tvg-name']||'Kanaal').trim(),logo:attrs['tvg-logo']||'',group:attrs['group-title']||'Overig',tvgId:attrs['tvg-id']||'',attrs};
+}else if(!l.startsWith('#')&&pending){pending.url=l;out.push(pending);pending=null;}
+}return out;
+}
+
+function parseEPG(xmlText){
+let parser=new DOMParser();let xml=parser.parseFromString(xmlText,"text/xml");let out={};
+xml.querySelectorAll("programme").forEach(p=>{
+let ch=p.getAttribute("channel");let title=(p.querySelector("title")?.textContent)||"";let start=p.getAttribute("start");
+if(!out[ch]) out[ch]=[];
+out[ch].push({title,start});
+});
+return out;
+}
+
+function keyFor(ch){return ch.tvgId||ch.url||ch.name;}
+
+function renderCategories(){
+const cats=['Alle','Favorieten',...Array.from(state.groups).sort((a,b)=>a.localeCompare(b))];
+els.catList.innerHTML='';
+cats.forEach(c=>{
+const btn=document.createElement('button');btn.textContent=c;if(c===state.currentGroup)btn.classList.add('active');
+btn.onclick=()=>{state.currentGroup=c;renderChannels();};
+els.catList.appendChild(btn);
+});
+}
+
+function channelMatches(ch){
+const inGroup = state.currentGroup==='Alle' || 
+                (state.currentGroup==='Favorieten' && state.favorites.has(keyFor(ch))) ||
+                ch.group===state.currentGroup;
+const s = state.search.trim().toLowerCase();
+const name = (ch.name || ch.attrs['tvg-name'] || '').toLowerCase();
+return inGroup && (!s || name.includes(s));
+}
+
+function renderChannels(){
+els.grid.innerHTML='';
+state.channels.filter(channelMatches).forEach(ch=>{
+const card=document.createElement('div');card.className='card';
+const logo=document.createElement('div');logo.className='logo';if(ch.logo){const img=document.createElement('img');img.src=ch.logo;logo.appendChild(img);}else{logo.textContent='Geen logo';}
+const name=document.createElement('div');name.className='name';name.textContent=ch.name;
+const epgDiv=document.createElement('div');epgDiv.className='epg';
+if(state.epg[ch.tvgId]&&state.epg[ch.tvgId][0]){epgDiv.textContent="▶ "+state.epg[ch.tvgId][0].title;}
+const fav=document.createElement('button');fav.className='fav';fav.innerHTML=state.favorites.has(keyFor(ch))?'★':'☆';
+if(state.favorites.has(keyFor(ch)))fav.classList.add('active');
+fav.onclick=e=>{e.stopPropagation();const k=keyFor(ch);state.favorites.has(k)?state.favorites.delete(k):state.favorites.add(k);localStorage.setItem('favorites_v1',JSON.stringify(Array.from(state.favorites)));renderChannels();};
+card.appendChild(logo);card.appendChild(name);card.appendChild(epgDiv);card.appendChild(fav);
+card.onclick=()=>{playStream(ch.url);};
+els.grid.appendChild(card);
+});
+}
+
+function playStream(url){
+if(Hls.isSupported()){let hls=new Hls();hls.loadSource(url);hls.attachMedia(els.video);}else{els.video.src=url;}
+els.video.play().catch(()=>{});
+}
+
+async function loadM3U(url){
+const proxyUrl = "https://cors-anywhere.herokuapp.com/";
+const res = await fetch(proxyUrl + encodeURIComponent(url));
+const txt = await res.text();
+state.channels = parseM3U(txt);
+state.groups = new Set(state.channels.map(c=>c.group||'Overig'));
+renderCategories();
+renderChannels();
+}
+
+async function loadEPG(url){
+if(!url) return;
+try{
+const proxyUrl = "https://cors-anywhere.herokuapp.com/";
+const res = await fetch(proxyUrl + encodeURIComponent(url));
+const txt = await res.text();
+state.epg = parseEPG(txt);
+renderChannels();
+}catch(e){console.log("EPG laden mislukt",e);}
+}
+
+els.loadBtn.addEventListener('click',()=>{
+if(!els.m3uUrl.value.trim())return;
+loadM3U(els.m3uUrl.value.trim());
+if(els.epgUrl.value.trim()) loadEPG(els.epgUrl.value.trim());
+});
+els.searchBox.addEventListener('input',()=>{state.search=els.searchBox.value;renderChannels();});
+</script>
+
+</body>
+</html>
